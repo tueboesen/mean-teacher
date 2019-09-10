@@ -18,6 +18,16 @@ from .utils import export, parameter_count
 
 
 @export
+def cifar_smalltest(pretrained=False, **kwargs):
+    assert not pretrained
+    model = ResNet32x32(ShakeShakeBlock,
+                        layers=[2, 2, 2],
+                        channels=32,
+                        downsample='shift_conv', **kwargs)
+    return model
+
+
+@export
 def cifar_shakeshake26(pretrained=False, **kwargs):
     assert not pretrained
     model = ResNet32x32(ShakeShakeBlock,

@@ -36,7 +36,8 @@ def parameters():
         'base_labeled_batch_size': 31,
 
         # Architecture
-        'arch': 'cifar_shakeshake26',
+        'arch': 'cifar_smalltest',
+        # 'arch': 'cifar_shakeshake26',
 
         # Costs
         'consistency_type': 'mse',
