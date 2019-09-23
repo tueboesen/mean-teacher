@@ -175,7 +175,7 @@ class ResNet32x32(nn.Module):
         x = self.layer3(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
-        return self.fc1(x), self.fc2(x)
+        return self.fc1(x), self.fc2(x), x
 
 
 def conv3x3(in_planes, out_planes, stride=1):

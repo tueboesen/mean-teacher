@@ -25,6 +25,13 @@ def parameters():
         # Technical details
         'workers': 2,
         'checkpoint_epochs': 20,
+        'dual_train': 1,
+        'ssl_train': 1,
+        'class_imbalance': 1,
+        'entropy_weight': True,
+        'laplace_mode': 1,
+        'mutable_known_labels': False,
+
 
         # Data
         'dataset': 'cifar10',
@@ -32,7 +39,7 @@ def parameters():
         'eval_subdir': 'test',
 
         # Data sampling
-        'base_batch_size': 128,
+        'base_batch_size': 100,
         'base_labeled_batch_size': 31,
 
         # Architecture
@@ -52,26 +59,14 @@ def parameters():
         'nesterov': True,
     }
 
-    # 4000 labels:
-    for data_seed in range(10, 20):
+    # 100 labels:
+    for data_seed in range(10, 11):
         yield {
             **defaults,
-            'title': '4000-label cifar-10',
-            'n_labels': 4000,
+            'title': '100-label cifar-10',
+            'n_labels': 100,
             'data_seed': data_seed,
-            'epochs': 300,
-            'lr_rampdown_epochs': 350,
-            'ema_decay': 0.99,
-        }
-
-    # 1000 labels:
-    for data_seed in range(10, 20):
-        yield {
-            **defaults,
-            'title': '1000-label cifar-10',
-            'n_labels': 1000,
-            'data_seed': data_seed,
-            'epochs': 180,
+            'epochs': 5,
             'lr_rampdown_epochs': 210,
             'ema_decay': 0.97,
         }

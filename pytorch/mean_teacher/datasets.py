@@ -6,7 +6,7 @@
 # Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
 
 import torchvision.transforms as transforms
-
+import torch
 from . import data
 from .utils import export
 
@@ -52,10 +52,15 @@ def cifar10():
         transforms.ToTensor(),
         transforms.Normalize(**channel_stats)
     ])
+    nclasses = 10
+    target_transform = transforms.Compose([
+        transforms.Lambda(lambda x: x*torch.ones(nclasses)),
+        transforms.LinearTransformation(torch.eye(nclasses))])
 
     return {
         'train_transformation': train_transformation,
         'eval_transformation': eval_transformation,
+        # 'target_transformation': target_transform,
         'datadir': 'data-local/images/cifar/cifar10/by-image',
-        'num_classes': 10
+        'num_classes': nclasses
     }

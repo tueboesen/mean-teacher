@@ -83,6 +83,19 @@ def create_parser():
                         help='evaluate model on evaluation set')
     parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                         help='use pre-trained model')
+    parser.add_argument('--dual-train', default=0, type=int,
+                        metavar='DT', help='Dual training (default 0)')
+    parser.add_argument('--ssl-train', default=0, type=int,
+                        metavar='SSL', help='SSL training (default 0)')
+    parser.add_argument('--class-imbalance', default=1, type=int,
+                        metavar='c_weight', help='enable class imbalance weight (default 1)')
+    parser.add_argument('--entropy-weight', default=True, type=str2bool,
+                        metavar='e_weight', help='enable entropy weight and one shot labels (default True)')
+    parser.add_argument('--laplace-mode', default=1, type=int,
+                        metavar='LM', help='Laplace mode, 0 = input, 1 = output, 2 = hybrid (default 1)')
+    parser.add_argument('--mutable-known-labels', default=False, type=str2bool,
+                        metavar='MKL', help='Enables the known labels to change (default False)')
+
     return parser
 
 

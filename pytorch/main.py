@@ -23,10 +23,11 @@ from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 import torchvision.datasets
 
 from mean_teacher import architectures, datasets, data, losses, ramps, cli
+from mean_teacher.losses import class_loss_calculation
 from mean_teacher.run_context import RunContext
-from mean_teacher.data import NO_LABEL
+from mean_teacher.data import NO_LABEL, ImageFolderWithIndex, entropy_weights, create_cardinal_Weight
 from mean_teacher.utils import *
-
+from mean_teacher.regularization import ANN_annoy, GraphLaplacian, SSL_ADMM, SSL_ADMM_dummy, ANN_W, SSL_Icen
 
 LOG = logging.getLogger('main')
 
@@ -46,7 +47,17 @@ def main(context):
 
     dataset_config = datasets.__dict__[args.dataset]()
     num_classes = dataset_config.pop('num_classes')
-    train_loader, eval_loader = create_data_loaders(**dataset_config, args=args)
+
+    train_loader, eval_loader, pretrain_loader,ssl_loader = create_data_loaders(**dataset_config, args=args)
+    if args.entropy_weight:
+        target_truth = np.copy(train_loader.dataset.targets)
+    else:
+        target_truth = np.argmax(train_loader.dataset.targets,axis=1)
+    idx_unlabelled = train_loader.batch_sampler.primary_indices
+    for idx in idx_unlabelled:
+        train_loader.dataset.targets[idx] = NO_LABEL
+
+
 
     def create_model(ema=False):
         LOG.info("=> creating {pretrained}{ema}model '{arch}'".format(
@@ -97,11 +108,62 @@ def main(context):
         validate(eval_loader, ema_model, ema_validation_log, global_step, args.start_epoch)
         return
 
-    for epoch in range(args.start_epoch, args.epochs):
+    if args.dual_train:
+        for epoch in range(3):
+            start_time = time.time()
+            # train for one epoch
+            train(train_loader, model, ema_model, optimizer, epoch, training_log)
+            # train(pretrain_loader, model, ema_model, optimizer, epoch, training_log)
+            LOG.info("--- pretraining epoch in %s seconds ---" % (time.time() - start_time))
+
+        nx = len(train_loader.dataset.targets)
+        nc = train_loader.dataset.nclasses
+        lambd = np.zeros((nc,nx))
+
+    for epoch in range(args.start_epoch+3, args.epochs):
+        #SSL
+        idx_labelled = train_loader.batch_sampler.secondary_indices
+        target_labelled = [train_loader.dataset.targets[idx] for idx in idx_labelled]
+        U, V, cp = SSL(ssl_loader, model, optimizer, epoch, training_log, idx_labelled,target_labelled,lambd,args.laplace_mode,target_truth)
+
+        # Test accuracy of SSL
+        C = np.argmax(cp, axis=1)
+        hits_SSL = np.zeros(nc)
+        acc_SSL = np.zeros(nc)
+        acc_SSL_tot = np.sum(C == target_truth) / len(C) * 100
+        for i in range(nc):
+            hits_SSL[i] = np.sum(C == i) / len(C) * 100
+            acc_SSL[i] = np.sum(C[C == i] == target_truth[C == i]) / np.sum(target_truth==i)*100
+
+        print("SSL hits (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(hits_SSL[0],hits_SSL[1],hits_SSL[2],hits_SSL[3],hits_SSL[4],hits_SSL[5],hits_SSL[6],hits_SSL[7],hits_SSL[8],hits_SSL[9]))
+        print(
+            "SSL acc (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(
+                acc_SSL[0], acc_SSL[1], acc_SSL[2], acc_SSL[3], acc_SSL[4], acc_SSL[5], acc_SSL[6], acc_SSL[7],
+                acc_SSL[8], acc_SSL[9]))
+        print("SSL Acc tot = {:3.2f} \n".format(acc_SSL_tot))
+
+        if args.entropy_weight:
+            if not args.mutable_known_labels:
+                C[idx_labelled] = target_labelled
+            train_loader.dataset.targets[:] = C[:]
+        else:
+            if not args.mutable_known_labels:
+                cp[idx_labelled,:] = target_labelled
+            train_loader.dataset.targets[:,:] = cp[:,:]
+
+
+        #Update Lambda
+        lambd += U - V
+
+
         start_time = time.time()
-        # train for one epoch
-        train(train_loader, model, ema_model, optimizer, epoch, training_log)
+        #Supervised training for one epoch
+        lambd = torch.from_numpy(lambd.T).float().cuda()
+
+        train_ADMM(train_loader, model, ema_model, optimizer, epoch, training_log,lambd,idx_labelled)
+        lambd = lambd.t().cpu().numpy()
         LOG.info("--- training epoch in %s seconds ---" % (time.time() - start_time))
+
 
         if args.evaluation_epochs and (epoch + 1) % args.evaluation_epochs == 0:
             start_time = time.time()
@@ -153,13 +215,14 @@ def create_data_loaders(train_transformation,
 
     assert_exactly_one([args.exclude_unlabeled, args.labeled_batch_size])
 
-    dataset = torchvision.datasets.ImageFolder(traindir, train_transformation)
-
+    dataset = ImageFolderWithIndex(traindir, transform=train_transformation, label_probability=(not args.entropy_weight))
+    # target_transform = torch.eye(self.nclasses)
     if args.labels:
         with open(args.labels) as f:
             labels = dict(line.split(' ') for line in f.read().splitlines())
         labeled_idxs, unlabeled_idxs = data.relabel_dataset(dataset, labels)
-
+        # for idx in unlabeled_idxs:
+        #     dataset.targets[idx] = NO_LABEL
     if args.exclude_unlabeled:
         sampler = SubsetRandomSampler(labeled_idxs)
         batch_sampler = BatchSampler(sampler, args.batch_size, drop_last=True)
@@ -182,7 +245,28 @@ def create_data_loaders(train_transformation,
         pin_memory=True,
         drop_last=False)
 
-    return train_loader, eval_loader
+    if args.dual_train:
+        sampler = SubsetRandomSampler(labeled_idxs)
+        batch_sampler = BatchSampler(sampler, args.batch_size, drop_last=False)
+        pretrain_loader = torch.utils.data.DataLoader(dataset,
+                                               batch_sampler=batch_sampler,
+                                               num_workers=args.workers,
+                                               pin_memory=True)
+    else:
+        pretrain_loader = None
+    if args.ssl_train:
+        ssl_loader = torch.utils.data.DataLoader(
+            torchvision.datasets.ImageFolder(traindir, eval_transformation),
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=2 * args.workers,  # Needs images twice as fast
+            pin_memory=True,
+            drop_last=False)
+    else:
+        ssl_loader = None
+
+
+    return train_loader, eval_loader, pretrain_loader,ssl_loader
 
 
 def update_ema_variables(model, ema_model, alpha, global_step):
@@ -211,7 +295,7 @@ def train(train_loader, model, ema_model, optimizer, epoch, log):
     ema_model.train()
 
     end = time.time()
-    for i, ((input, ema_input), target) in enumerate(train_loader):
+    for i, ((input, ema_input), target, idxs) in enumerate(train_loader):
         # measure data loading time
         meters.update('data_time', time.time() - end)
 
@@ -236,10 +320,10 @@ def train(train_loader, model, ema_model, optimizer, epoch, log):
             logit1 = model_out
             ema_logit = ema_model_out
         else:
-            assert len(model_out) == 2
-            assert len(ema_model_out) == 2
-            logit1, logit2 = model_out
-            ema_logit, _ = ema_model_out
+            assert len(model_out) == 3
+            assert len(ema_model_out) == 3
+            logit1, logit2,_ = model_out
+            ema_logit, _,_ = ema_model_out
 
         ema_logit = Variable(ema_logit.detach().data, requires_grad=False)
 
@@ -250,11 +334,15 @@ def train(train_loader, model, ema_model, optimizer, epoch, log):
         else:
             class_logit, cons_logit = logit1, logit1
             res_loss = 0
+        if args.entropy_weight:
+            target_max = target_var
+        else:
+            target_max = torch.argmax(target_var,dim=1)
 
-        class_loss = class_criterion(class_logit, target_var) / minibatch_size
+        class_loss = class_criterion(class_logit, target_max) / labeled_minibatch_size
         meters.update('class_loss', class_loss.item())
 
-        ema_class_loss = class_criterion(ema_logit, target_var) / minibatch_size
+        ema_class_loss = class_criterion(ema_logit, target_max) / labeled_minibatch_size
         meters.update('ema_class_loss', ema_class_loss.item())
 
         if args.consistency:
@@ -270,13 +358,152 @@ def train(train_loader, model, ema_model, optimizer, epoch, log):
         assert not (np.isnan(loss.item()) or loss.item() > 1e5), 'Loss explosion: {}'.format(loss.item())
         meters.update('loss', loss.item())
 
-        prec1, prec5 = accuracy(class_logit.data, target_var.data, topk=(1, 5))
+        prec1, prec5 = accuracy(class_logit.data, target_max.data, topk=(1, 5))
         meters.update('top1', prec1, labeled_minibatch_size)
         meters.update('error1', 100. - prec1, labeled_minibatch_size)
         meters.update('top5', prec5, labeled_minibatch_size)
         meters.update('error5', 100. - prec5, labeled_minibatch_size)
 
-        ema_prec1, ema_prec5 = accuracy(ema_logit.data, target_var.data, topk=(1, 5))
+        ema_prec1, ema_prec5 = accuracy(ema_logit.data, target_max.data, topk=(1, 5))
+        meters.update('ema_top1', ema_prec1, labeled_minibatch_size)
+        meters.update('ema_error1', 100. - ema_prec1, labeled_minibatch_size)
+        meters.update('ema_top5', ema_prec5, labeled_minibatch_size)
+        meters.update('ema_error5', 100. - ema_prec5, labeled_minibatch_size)
+
+        # compute gradient and do SGD step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        global_step += 1
+        update_ema_variables(model, ema_model, args.ema_decay, global_step)
+
+        # measure elapsed time
+        meters.update('batch_time', time.time() - end)
+        end = time.time()
+
+        if i % args.print_freq == 0:
+            LOG.info(
+                'Epoch: [{0}][{1}/{2}]\t'
+                'Time {meters[batch_time]:.3f}\t'
+                'Data {meters[data_time]:.3f}\t'
+                'Class {meters[class_loss]:.4f}\t'
+                'Cons {meters[cons_loss]:.4f}\t'
+                'Prec@1 {meters[top1]:.3f}\t'
+                'Prec@5 {meters[top5]:.3f}'.format(
+                    epoch, i, len(train_loader), meters=meters))
+            log.record(epoch + i / len(train_loader), {
+                'step': global_step,
+                **meters.values(),
+                **meters.averages(),
+                **meters.sums()
+            })
+
+def train_ADMM(train_loader, model, ema_model, optimizer, epoch, log,lambd,tmp):
+    global global_step
+    labels = train_loader.dataset.targets[:]
+    if args.entropy_weight:
+        cardinal_weights = create_cardinal_Weight(labels)
+        class_criterion = nn.CrossEntropyLoss(reduction='none', ignore_index=NO_LABEL,weight=torch.from_numpy(cardinal_weights)).cuda() #Note the none!, we need to manually sum it up
+    else:
+        cardinal_weights = create_cardinal_Weight(np.argmax(labels,axis=1))
+        class_criterion = nn.MSELoss(reduction='none').cuda()
+    CW = torch.from_numpy(cardinal_weights).cuda()
+    if args.consistency_type == 'mse':
+        consistency_criterion = losses.softmax_mse_loss_no_reduction #losses.softmax_mse_loss
+    elif args.consistency_type == 'kl':
+        consistency_criterion = losses.softmax_kl_loss
+    else:
+        assert False, args.consistency_type
+    residual_logit_criterion = losses.symmetric_mse_loss
+    labeled_minibatch_size = args.labeled_batch_size
+
+    meters = AverageMeterSet()
+
+    # switch to train mode
+    model.train()
+    ema_model.train()
+
+    end = time.time()
+    for i, ((input, ema_input), target, idxs) in enumerate(train_loader):
+        idxs = idxs.long()
+        lambd_select = lambd[idxs, :]
+        # measure data loading time
+        meters.update('data_time', time.time() - end)
+
+        adjust_learning_rate(optimizer, epoch, i, len(train_loader))
+        meters.update('lr', optimizer.param_groups[0]['lr'])
+
+        input_var = torch.autograd.Variable(input)
+        with torch.no_grad():
+            ema_input_var = torch.autograd.Variable(ema_input)
+        target_var = torch.autograd.Variable(target.cuda(non_blocking=True))
+
+        minibatch_size = len(target_var)
+        unlabeled_minibatch_size = minibatch_size - labeled_minibatch_size
+        assert labeled_minibatch_size > 0
+        meters.update('labeled_minibatch_size', labeled_minibatch_size)
+
+        ema_model_out = ema_model(ema_input_var)
+        model_out = model(input_var)
+
+        if isinstance(model_out, Variable):
+            assert args.logit_distance_cost < 0
+            logit1 = model_out
+            ema_logit = ema_model_out
+        else:
+            assert len(model_out) == 3
+            assert len(ema_model_out) == 3
+            logit1, logit2, _ = model_out
+            ema_logit, _, _ = ema_model_out
+
+        ema_logit = Variable(ema_logit.detach().data, requires_grad=False)
+
+        if args.logit_distance_cost >= 0:
+            class_logit, cons_logit = logit1, logit2
+        else:
+            class_logit, cons_logit = logit1, logit1
+        softmax1, softmax2 = F.softmax(logit1, dim=1), F.softmax(ema_logit, dim=1)
+        iu = list(range(0, unlabeled_minibatch_size))
+        ik = list(range(unlabeled_minibatch_size, minibatch_size))
+
+        class_loss = class_loss_calculation(class_logit+lambd_select, target_var, iu, ik, class_criterion, CW,softx=softmax1)
+        ema_class_loss = class_loss_calculation(ema_logit+lambd_select, target_var, iu, ik, class_criterion, CW, softx=softmax2)
+
+        meters.update('class_loss', class_loss.item())
+        meters.update('ema_class_loss', ema_class_loss.item())
+        if args.entropy_weight:
+            target_max = target_var
+        else:
+            target_max = torch.argmax(target_var,dim=1)
+
+        if args.consistency:
+            consistency_weight = get_current_consistency_weight(epoch)
+            meters.update('cons_weight', consistency_weight)
+            consistency_loss = consistency_weight * torch.sum(CW[target_max]*torch.sum(consistency_criterion(cons_logit, ema_logit),dim=1)) / minibatch_size
+            # consistency_loss = consistency_weight * consistency_criterion(cons_logit, ema_logit) / minibatch_size
+            meters.update('cons_loss', consistency_loss.item())
+        else:
+            consistency_loss = 0
+            meters.update('cons_loss', 0)
+
+        if args.logit_distance_cost >= 0:
+            res_loss = args.logit_distance_cost * residual_logit_criterion(class_logit, cons_logit, weight=CW[target_max]) / minibatch_size
+            meters.update('res_loss', res_loss.item())
+        else:
+            res_loss = 0
+
+
+        loss = class_loss + consistency_loss + res_loss
+        assert not (np.isnan(loss.item()) or loss.item() > 1e5), 'Loss explosion: {}'.format(loss.item())
+        meters.update('loss', loss.item())
+
+        prec1, prec5 = accuracy(class_logit.data, target_max.data, topk=(1, 5))
+        meters.update('top1', prec1, labeled_minibatch_size)
+        meters.update('error1', 100. - prec1, labeled_minibatch_size)
+        meters.update('top5', prec5, labeled_minibatch_size)
+        meters.update('error5', 100. - prec5, labeled_minibatch_size)
+
+        ema_prec1, ema_prec5 = accuracy(ema_logit.data, target_max.data, topk=(1, 5))
         meters.update('ema_top1', ema_prec1, labeled_minibatch_size)
         meters.update('ema_error1', 100. - ema_prec1, labeled_minibatch_size)
         meters.update('ema_top5', ema_prec5, labeled_minibatch_size)
@@ -311,6 +538,81 @@ def train(train_loader, model, ema_model, optimizer, epoch, log):
             })
 
 
+def SSL(SSL_loader, model, log, global_step, epoch, idx,C,lambd,laplace_mode,target_truth):
+    class_criterion = nn.CrossEntropyLoss(reduction='sum', ignore_index=NO_LABEL).cuda()
+    meters = AverageMeterSet()
+
+    # switch to evaluate mode
+    model.eval()
+
+    end = time.time()
+    descriptorcpu = []
+    input_list = []
+    outputcpu = []
+    with torch.no_grad():
+        for i, (input, target ) in enumerate(SSL_loader):
+            meters.update('data_time', time.time() - end)
+
+            input_var = torch.autograd.Variable(input)
+            target_var = torch.autograd.Variable(target.cuda(non_blocking=True))
+
+            # compute output
+            output,_,descriptor = model(input_var)
+            descriptorcpu.append(descriptor.cpu().numpy())
+            input_list.append(input_var.cpu().numpy())
+            outputcpu.append(output.cpu().numpy())
+        descriptor_flat = np.asarray([item for sublist in descriptorcpu for item in sublist])
+        input_array = np.asarray([item for sublist in input_list for item in sublist])
+        U = np.asarray([item for sublist in outputcpu for item in sublist]).transpose()
+
+        #Test accuracy of U
+        Cc = np.argmax(U.T, axis=1)
+        nc, nx = U.shape
+        hits_pretrain = np.zeros(nc)
+        acc_pretrain = np.zeros(nc)
+        acc_SSL_tot = np.sum(Cc == target_truth) / len(Cc) * 100
+        for i in range(nc):
+            hits_pretrain[i] = np.sum(Cc == i) / len(Cc) * 100
+            acc_pretrain[i] = np.sum(Cc[Cc == i] == target_truth[Cc == i]) / np.sum(target_truth == i)*100
+
+        print("SSL hits (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(hits_pretrain[0],hits_pretrain[1],hits_pretrain[2],hits_pretrain[3],hits_pretrain[4],hits_pretrain[5],hits_pretrain[6],hits_pretrain[7],hits_pretrain[8],hits_pretrain[9]))
+        print(
+            "SSL acc (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(
+                acc_pretrain[0], acc_pretrain[1], acc_pretrain[2], acc_pretrain[3], acc_pretrain[4], acc_pretrain[5], acc_pretrain[6], acc_pretrain[7],
+                acc_pretrain[8], acc_pretrain[9]))
+        print("SSL Acc tot = {:3.2f} \n".format(acc_SSL_tot))
+
+
+        V = np.copy(U)
+        if laplace_mode == 0:
+            graph_feats =input_array.reshape(input_array.shape[0],-1)  #Probably needs to be flattened
+        elif laplace_mode == 1:
+            graph_feats = descriptor_flat
+        elif laplace_mode == 2:
+            alpha = 1-min(0.01*global_step,1)
+            graph_feats = alpha*input_var + (1-alpha)*descriptor_flat
+        A,d = ANN_annoy(graph_feats)
+        # L = GraphLaplacian(graph_feats, A, d)
+        #TODO Decide whether this is only the labelled or the full dataset (used for misfit calc in SSL)
+        beta = 1e-3
+        rho = 1e-3
+        maxIter = 20
+        nc = len(np.unique(C))
+        nk = len(C)
+        Cpk = np.zeros((nc,nk))
+        alpha = 100
+        # U, cp = SSL_ADMM(U, idx, Cpk, L, alpha, beta, rho, lambd, V, maxIter)
+        Y = np.zeros((nx,nc))
+        for (i,val) in zip(idx,C):
+            Y[i,val] = 1
+        alpha = 0.99
+        L = ANN_W(graph_feats, A, alpha)
+        cp = SSL_Icen(L,Y)
+
+    return U, V, cp.T
+
+
+
 def validate(eval_loader, model, log, global_step, epoch):
     class_criterion = nn.CrossEntropyLoss(reduction='sum', ignore_index=NO_LABEL).cuda()
     meters = AverageMeterSet()
@@ -332,8 +634,8 @@ def validate(eval_loader, model, log, global_step, epoch):
             meters.update('labeled_minibatch_size', labeled_minibatch_size)
 
             # compute output
-            output1, output2 = model(input_var)
-            softmax1, softmax2 = F.softmax(output1, dim=1), F.softmax(output2, dim=1)
+            output1, _,_ = model(input_var)
+            # softmax1, softmax2 = F.softmax(output1, dim=1), F.softmax(output2, dim=1)
             class_loss = class_criterion(output1, target_var) / minibatch_size
 
             # measure accuracy and record loss
