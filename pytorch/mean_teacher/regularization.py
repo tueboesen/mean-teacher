@@ -9,19 +9,60 @@ import statistics
 from scipy.sparse import coo_matrix,csr_matrix, identity,triu,tril,diags,spdiags
 from scipy.sparse.linalg import spsolve, cg, LinearOperator, spsolve_triangular
 import torch
+import hnswlib
 
 from mean_teacher.Solver import blkPCG
 
 
+def ANN_hnsw(x,k=10):
+    nsamples = len(x)
+    dim = len(x[0])
+    print('dimension=', dim)
+    print('nsamples =', nsamples)
+    t1 = time.time()
+    # Generating sample data
+    data = x
+    data_labels = np.arange(nsamples)
+
+    # Declaring index
+    p = hnswlib.Index(space='cosine', dim=dim)  # possible options are l2, cosine or ip
+
+    # Initing index - the maximum number of elements should be known beforehand
+    p.init_index(max_elements=nsamples, ef_construction=200, M=32)
+
+    # Element insertion (can be called several times):
+    p.add_items(data, data_labels)
+
+    # Controlling the recall by setting ef:
+    p.set_ef(100)  # ef should always be > k
+
+    # Query dataset, k - number of closest elements (returns 2 numpy arrays)
+    labels, distances = p.knn_query(data, k=k)
+    t2 = time.time()
+    Js = []
+    Is = []
+    for i,subnn in enumerate(labels):
+        for itemnn in subnn:
+            Js.append(itemnn)
+            Is.append(i)
+    Vs = np.ones_like(Js)
+    A = csr_matrix((Vs, (Is,Js)),shape=(nsamples,nsamples))
+    A = (A + A.T).sign()
+    t3 = time.time()
+    print('Time spent finding ANN   : {}'.format(t2 - t1))
+    print('Time spent building A    : {}'.format(t3 - t2))
+    return A,np.mean(distances)
+
+
 def ANN_annoy(x,k=10):
-    acc_factor = 1
-    ntrees = 2
+    acc_factor = 30
+    ntrees = 300
     nsamples = len(x)
     dim = len(x[0])
     print('dimension=', dim)
     print('nsamples =', nsamples)
     search_k = int(ntrees * k * acc_factor)
-    t = AnnoyIndex(dim, "euclidean")  # Length of item vector that will be indexed
+    t = AnnoyIndex(dim, "angular")  # Length of item vector that will be indexed
     # Now we add some data
     for i in range(nsamples):
         t.add_item(i, x[i])
@@ -39,12 +80,21 @@ def ANN_annoy(x,k=10):
     dist = [item for sublist in distances for item in sublist]
     Js = []
     Is = []
-    for i,sublist in enumerate(neighbors):
-        for item in sublist:
-            Js.append(item)
-            Is.append(i)
+    # Vs = []
+    # ctn = 0
+    # for (idx,vals) in enumerate(distances):
+    #     if vals[0] > 0:
+    #         print(idx)
+    #         ctn += 1
+
+
+    # for i,(subnn, subdist) in enumerate(zip(neighbors, distances)):
+    #     for (itemnn,itemdist) in zip(subnn, subdist):
+    #         Js.append(itemnn)
+    #         Is.append(i)
+    #         Vs.append(1-itemdist)
     Vs = np.ones_like(Js)
-    A = csr_matrix((Vs,(Is,Js)),shape=(nsamples,nsamples))
+    A = csr_matrix((Vs, (Is,Js)),shape=(nsamples,nsamples))
     A = (A + A.T).sign()
     t4 = time.time()
     print('Time spent building trees: {}'.format(t2 - t1))
@@ -102,7 +152,10 @@ def ANN_W(X, A,alpha):
 
     # for (i,j) in zip(I,J):
     V = np.sum((X[Is] * X[Js]) ** 3, axis=1)
-    #TODO MAKE SURE NO ELEMENT OF V IS LESS THAN ZERO
+    print("Number of V elements less than zero {}".format(np.sum(V < 0)))
+    print("smallest V {}".format(np.min(V)))
+    assert np.min(V) > 0, print("some elements of V are less than zero")
+
     Aa = coo_matrix((V, (Is, Js)), shape=(nx, nx))
     W = Aa.T + Aa
     D = coo_matrix((nx, nx))
@@ -115,6 +168,36 @@ def ANN_W(X, A,alpha):
     t2 = time.time()
     print("ANN_W {}".format(t2 - t1))
     return L
+
+def ANN_W2(X, A,alpha):
+    t1 = time.time()
+    if isinstance(X, torch.Tensor):
+        X = X.numpy()
+    A.setdiag(0)
+    A.eliminate_zeros()
+    A = A.tocoo()
+    nx, _ = A.shape
+    Is = A.row
+    Js = A.col
+
+    # for (i,j) in zip(I,J):
+    V = 1-np.sum((X[Is] * X[Js]), axis=1)/(np.sqrt(np.sum(X[Is]**2, axis=1))*np.sqrt(np.sum(X[Js]**2, axis=1)))
+    assert np.min(V) > 0, print("some elements of V are less than zero")
+    assert np.max(V) < 1, print("some elements of V are larger than 1")
+
+    Aa = coo_matrix((V, (Is, Js)), shape=(nx, nx))
+    W = Aa.T + Aa
+    D = coo_matrix((nx, nx))
+    coo_matrix.setdiag(D, np.squeeze(np.array(np.sum(W, axis=0))))
+    Dh = np.sqrt(D)
+    np.reciprocal(Dh.data, out=Dh.data)
+    Ww = Dh @ W @ Dh
+    I = identity(nx)
+    L = (I - alpha * Ww)
+    t2 = time.time()
+    print("ANN_W {}".format(t2 - t1))
+    return L
+
 
 
 def softmaxloss(U,C):

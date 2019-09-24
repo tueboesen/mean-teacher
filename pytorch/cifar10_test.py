@@ -63,10 +63,10 @@ def parameters():
     for data_seed in range(10, 11):
         yield {
             **defaults,
-            'title': '100-label cifar-10',
-            'n_labels': 100,
+            'title': '4000-label cifar-10',
+            'n_labels': 4000,
             'data_seed': data_seed,
-            'epochs': 5,
+            'epochs': 30,
             'lr_rampdown_epochs': 210,
             'ema_decay': 0.97,
         }

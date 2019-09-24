@@ -27,7 +27,8 @@ from mean_teacher.losses import class_loss_calculation
 from mean_teacher.run_context import RunContext
 from mean_teacher.data import NO_LABEL, ImageFolderWithIndex, entropy_weights, create_cardinal_Weight
 from mean_teacher.utils import *
-from mean_teacher.regularization import ANN_annoy, GraphLaplacian, SSL_ADMM, SSL_ADMM_dummy, ANN_W, SSL_Icen
+from mean_teacher.regularization import ANN_annoy, GraphLaplacian, SSL_ADMM, SSL_ADMM_dummy, ANN_W, SSL_Icen, ANN_W2, \
+    ANN_hnsw
 
 LOG = logging.getLogger('main')
 
@@ -109,7 +110,7 @@ def main(context):
         return
 
     if args.dual_train:
-        for epoch in range(3):
+        for epoch in range(10):
             start_time = time.time()
             # train for one epoch
             train(train_loader, model, ema_model, optimizer, epoch, training_log)
@@ -120,11 +121,12 @@ def main(context):
         nc = train_loader.dataset.nclasses
         lambd = np.zeros((nc,nx))
 
-    for epoch in range(args.start_epoch+3, args.epochs):
-        #SSL
-        idx_labelled = train_loader.batch_sampler.secondary_indices
-        target_labelled = [train_loader.dataset.targets[idx] for idx in idx_labelled]
-        U, V, cp = SSL(ssl_loader, model, optimizer, epoch, training_log, idx_labelled,target_labelled,lambd,args.laplace_mode,target_truth)
+    #SSL
+    idx_labelled = train_loader.batch_sampler.secondary_indices
+    target_labelled = [train_loader.dataset.targets[idx] for idx in idx_labelled]
+    U, V, cp = SSL(ssl_loader, model, optimizer, epoch, training_log, idx_labelled,target_labelled,lambd,args.laplace_mode,target_truth)
+
+    for epoch in range(args.start_epoch+10, args.epochs):
 
         # Test accuracy of SSL
         C = np.argmax(cp, axis=1)
@@ -154,6 +156,8 @@ def main(context):
 
         #Update Lambda
         lambd += U - V
+        print("Lambda mean value = {}".format(np.mean(np.abs(lambd))))
+
 
 
         start_time = time.time()
@@ -591,7 +595,8 @@ def SSL(SSL_loader, model, log, global_step, epoch, idx,C,lambd,laplace_mode,tar
         elif laplace_mode == 2:
             alpha = 1-min(0.01*global_step,1)
             graph_feats = alpha*input_var + (1-alpha)*descriptor_flat
-        A,d = ANN_annoy(graph_feats)
+        # A,d = ANN_annoy(graph_feats)
+        A,d = ANN_hnsw(graph_feats)
         # L = GraphLaplacian(graph_feats, A, d)
         #TODO Decide whether this is only the labelled or the full dataset (used for misfit calc in SSL)
         beta = 1e-3
@@ -606,10 +611,49 @@ def SSL(SSL_loader, model, log, global_step, epoch, idx,C,lambd,laplace_mode,tar
         for (i,val) in zip(idx,C):
             Y[i,val] = 1
         alpha = 0.99
-        L = ANN_W(graph_feats, A, alpha)
+        B = A.copy()
+        L = ANN_W(graph_feats, B, alpha)
+        BB = A.copy()
+        L2 = ANN_W2(graph_feats, BB, alpha)
         cp = SSL_Icen(L,Y)
+        cp2 = SSL_Icen(L2,Y)
 
-    return U, V, cp.T
+        #Test acc of ANNs
+        Cc = np.argmax(cp.T, axis=1)
+        nc, nx = cp.shape
+        hits_pretrain = np.zeros(nc)
+        acc_pretrain = np.zeros(nc)
+        acc_SSL_tot = np.sum(Cc == target_truth) / len(Cc) * 100
+        for i in range(nc):
+            hits_pretrain[i] = np.sum(Cc == i) / len(Cc) * 100
+            acc_pretrain[i] = np.sum(Cc[Cc == i] == target_truth[Cc == i]) / np.sum(target_truth == i)*100
+
+        print("SSL hits (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(hits_pretrain[0],hits_pretrain[1],hits_pretrain[2],hits_pretrain[3],hits_pretrain[4],hits_pretrain[5],hits_pretrain[6],hits_pretrain[7],hits_pretrain[8],hits_pretrain[9]))
+        print(
+            "SSL acc (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(
+                acc_pretrain[0], acc_pretrain[1], acc_pretrain[2], acc_pretrain[3], acc_pretrain[4], acc_pretrain[5], acc_pretrain[6], acc_pretrain[7],
+                acc_pretrain[8], acc_pretrain[9]))
+        print("SSL Acc tot = {:3.2f} \n".format(acc_SSL_tot))
+
+        #Test acc of ANNs 2
+        Cc = np.argmax(cp2.T, axis=1)
+        nc, nx = cp2.shape
+        hits_pretrain = np.zeros(nc)
+        acc_pretrain = np.zeros(nc)
+        acc_SSL_tot = np.sum(Cc == target_truth) / len(Cc) * 100
+        for i in range(nc):
+            hits_pretrain[i] = np.sum(Cc == i) / len(Cc) * 100
+            acc_pretrain[i] = np.sum(Cc[Cc == i] == target_truth[Cc == i]) / np.sum(target_truth == i)*100
+
+        print("SSL hits (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(hits_pretrain[0],hits_pretrain[1],hits_pretrain[2],hits_pretrain[3],hits_pretrain[4],hits_pretrain[5],hits_pretrain[6],hits_pretrain[7],hits_pretrain[8],hits_pretrain[9]))
+        print(
+            "SSL acc (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(
+                acc_pretrain[0], acc_pretrain[1], acc_pretrain[2], acc_pretrain[3], acc_pretrain[4], acc_pretrain[5], acc_pretrain[6], acc_pretrain[7],
+                acc_pretrain[8], acc_pretrain[9]))
+        print("SSL Acc tot = {:3.2f} \n".format(acc_SSL_tot))
+
+
+    return U, V, cp2.T
 
 
 
