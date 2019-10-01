@@ -320,3 +320,4 @@ class ShiftConvDownsample(nn.Module):
         x = self.conv(x)
         x = self.bn(x)
         return x
+

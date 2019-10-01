@@ -24,14 +24,23 @@ def parameters():
     defaults = {
         # Technical details
         'workers': 2,
-        'checkpoint_epochs': 20,
-        'dual_train': 1,
-        'ssl_train': 1,
+        'checkpoint_epochs': 2,
+        # Pseudo labels
+        'pre_train_epochs': 2,
+        'ssl_train_iter': 200,
         'class_imbalance': 1,
         'entropy_weight': True,
-        'laplace_mode': 1,
+        'reg_input': 1,
         'mutable_known_labels': False,
+        'ANN_method': 2,
+        'laplace_mode': 2,
+        'SSL_ADMM': 0,
+        'deterministic': True,
 
+        # Save/Load
+        # 'resume': ".\\results\\cifar10_test\\2019-09-25_16_58_52\\4000_10\\transient\\checkpoint.2.ckpt",
+         'save_pretrain': True,
+         # 'load_pretrain': ".\\results\\cifar10_test\\2019-09-30_17_03_38\\4000_10\\transient\\pretrain.2.ckpt",
 
         # Data
         'dataset': 'cifar10',
@@ -39,7 +48,7 @@ def parameters():
         'eval_subdir': 'test',
 
         # Data sampling
-        'base_batch_size': 100,
+        'base_batch_size': 128,
         'base_labeled_batch_size': 31,
 
         # Architecture
@@ -59,17 +68,29 @@ def parameters():
         'nesterov': True,
     }
 
-    # 100 labels:
-    for data_seed in range(10, 11):
+    # 4000 labels:
+    for data_seed in range(10, 20):
         yield {
             **defaults,
             'title': '4000-label cifar-10',
             'n_labels': 4000,
             'data_seed': data_seed,
-            'epochs': 30,
-            'lr_rampdown_epochs': 210,
-            'ema_decay': 0.97,
+            'epochs': 300,
+            'lr_rampdown_epochs': 350,
+            'ema_decay': 0.99,
         }
+
+    # # 4000 labels:
+    # for data_seed in range(10, 11):
+    #     yield {
+    #         **defaults,
+    #         'title': '4000-label cifar-10',
+    #         'n_labels': 4000,
+    #         'data_seed': data_seed,
+    #         'epochs': 210,
+    #         'lr_rampdown_epochs': 210,
+    #         'ema_decay': 0.97,
+    #     }
 
 
 def run(title, base_batch_size, base_labeled_batch_size, base_lr, n_labels, data_seed, **kwargs):
@@ -83,9 +104,10 @@ def run(title, base_batch_size, base_labeled_batch_size, base_lr, n_labels, data
         'labeled_batch_size': base_labeled_batch_size * ngpu,
         'lr': base_lr * ngpu,
         'labels': 'data-local/labels/cifar10/{}_balanced_labels/{:02d}.txt'.format(n_labels, data_seed),
+        'data_seed': data_seed,
     }
     context = RunContext(__file__, "{}_{}".format(n_labels, data_seed))
-    main.args = parse_dict_args(**adapted_args, **kwargs)
+    main.args = parse_dict_args(**adapted_args,**kwargs)
     main.main(context)
 
 

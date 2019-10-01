@@ -10,15 +10,20 @@
 import itertools
 import logging
 import os.path
+import shutil
 import sys
 import numpy
+import torchvision
 from PIL import Image
 import numpy as np
-from torch.utils.data.sampler import Sampler
+from torch.utils.data.sampler import Sampler, SubsetRandomSampler, BatchSampler
 from torchvision import datasets, transforms
 from torch.utils import data
 from torchvision.datasets.folder import make_dataset, accimage_loader, pil_loader
 import torch
+
+from mean_teacher.utils import assert_exactly_one
+
 LOG = logging.getLogger('main')
 NO_LABEL = -1
 
@@ -39,6 +44,7 @@ class RandomTranslateWithReflect:
         self.max_translation = max_translation
 
     def __call__(self, old_image):
+        np.random.seed(10)
         xtranslation, ytranslation = np.random.randint(-self.max_translation,
                                                        self.max_translation + 1,
                                                        size=2)
@@ -273,7 +279,7 @@ class DatasetFolderWithIndex(data.Dataset):
         fmt_str += '{0}{1}'.format(tmp, self.target_transform.__repr__().replace('\n', '\n' + ' ' * len(tmp)))
         return fmt_str
 
-IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm', '.tif', '.tiff', 'webp']
+IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm', '.tif', '.tiff', 'webp')
 
 def default_loader(path):
     from torchvision import get_image_backend
@@ -332,3 +338,85 @@ def entropy_weights(x):
     weights = 1 -entropy/np.log(nc)
     return weights
 
+
+
+def create_data_loaders(train_transformation,
+                        eval_transformation,
+                        datadir,
+                        args):
+    traindir = os.path.join(datadir, args.train_subdir)
+    evaldir = os.path.join(datadir, args.eval_subdir)
+
+    assert_exactly_one([args.exclude_unlabeled, args.labeled_batch_size])
+
+    dataset = ImageFolderWithIndex(traindir, transform=train_transformation, label_probability=(not args.entropy_weight))
+    # target_transform = torch.eye(self.nclasses)
+    if args.labels:
+        with open(args.labels) as f:
+            labels = dict(line.split(' ') for line in f.read().splitlines())
+        labeled_idxs, unlabeled_idxs = relabel_dataset(dataset, labels)
+        # for idx in unlabeled_idxs:
+        #     dataset.targets[idx] = NO_LABEL
+    if args.exclude_unlabeled:
+        sampler = SubsetRandomSampler(labeled_idxs)
+        batch_sampler = BatchSampler(sampler, args.batch_size, drop_last=True)
+    elif args.labeled_batch_size:
+        batch_sampler = TwoStreamBatchSampler(
+            unlabeled_idxs, labeled_idxs, args.batch_size, args.labeled_batch_size)
+    else:
+        assert False, "labeled batch size {}".format(args.labeled_batch_size)
+
+    train_loader = torch.utils.data.DataLoader(dataset,
+                                               batch_sampler=batch_sampler,
+                                               num_workers=args.workers,
+                                               pin_memory=True)
+
+    eval_loader = torch.utils.data.DataLoader(
+        torchvision.datasets.ImageFolder(evaldir, eval_transformation),
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=2 * args.workers,  # Needs images twice as fast
+        pin_memory=True,
+        drop_last=False)
+
+    if args.pre_train_epochs > 0:
+        sampler = SubsetRandomSampler(labeled_idxs)
+        batch_sampler = BatchSampler(sampler, args.batch_size, drop_last=False)
+        pretrain_loader = torch.utils.data.DataLoader(dataset,
+                                               batch_sampler=batch_sampler,
+                                               num_workers=args.workers,
+                                               pin_memory=True)
+    else:
+        pretrain_loader = None
+    if args.ssl_train_iter > 0:
+        ssl_loader = torch.utils.data.DataLoader(
+            torchvision.datasets.ImageFolder(traindir, eval_transformation),
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=2 * args.workers,  # Needs images twice as fast
+            pin_memory=True,
+            drop_last=False)
+    else:
+        ssl_loader = None
+
+
+    return train_loader, eval_loader, pretrain_loader,ssl_loader
+
+
+
+def save_checkpoint(state, is_best, dirpath, epoch):
+    filename = 'checkpoint.{}.ckpt'.format(epoch)
+    checkpoint_path = os.path.join(dirpath, filename)
+    best_path = os.path.join(dirpath, 'best.ckpt')
+    torch.save(state, checkpoint_path)
+    LOG.info("--- checkpoint saved to %s ---" % checkpoint_path)
+    if is_best:
+        shutil.copyfile(checkpoint_path, best_path)
+        LOG.info("--- checkpoint copied to %s ---" % best_path)
+
+
+def save_pretraining(state, dirpath, epoch):
+    filename = 'pretrain.{}.ckpt'.format(epoch)
+    checkpoint_path = os.path.join(dirpath, filename)
+    torch.save(state, checkpoint_path)
+    LOG.info("--- pretrain saved to %s ---" % checkpoint_path)

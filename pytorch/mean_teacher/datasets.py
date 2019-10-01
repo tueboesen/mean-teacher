@@ -55,7 +55,7 @@ def cifar10():
     nclasses = 10
     target_transform = transforms.Compose([
         transforms.Lambda(lambda x: x*torch.ones(nclasses)),
-        transforms.LinearTransformation(torch.eye(nclasses))])
+        transforms.LinearTransformation(torch.eye(nclasses),torch.eye(nclasses))])
 
     return {
         'train_transformation': train_transformation,

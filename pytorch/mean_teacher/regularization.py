@@ -1,4 +1,4 @@
-from annoy import AnnoyIndex
+# from annoy import AnnoyIndex
 import time
 import scipy.io as sio
 from os import walk
@@ -56,59 +56,52 @@ def ANN_hnsw(x,k=10):
 
 def ANN_annoy(x,k=10):
     acc_factor = 30
-    ntrees = 300
-    nsamples = len(x)
-    dim = len(x[0])
-    print('dimension=', dim)
-    print('nsamples =', nsamples)
-    search_k = int(ntrees * k * acc_factor)
-    t = AnnoyIndex(dim, "angular")  # Length of item vector that will be indexed
-    # Now we add some data
-    for i in range(nsamples):
-        t.add_item(i, x[i])
-    t1 = time.time()
-    t.build(ntrees)  # Now we build the trees
-    t2 = time.time()
-    # Now lets find the actual neighbors
-    neighbors = []
-    distances = []
-    for i in range(nsamples):
-        idx, dist = t.get_nns_by_item(i, k, include_distances=True)
-        neighbors.append(idx)
-        distances.append(dist)
-    t3 = time.time()
-    dist = [item for sublist in distances for item in sublist]
-    Js = []
-    Is = []
-    # Vs = []
-    # ctn = 0
-    # for (idx,vals) in enumerate(distances):
-    #     if vals[0] > 0:
-    #         print(idx)
-    #         ctn += 1
-
-
-    # for i,(subnn, subdist) in enumerate(zip(neighbors, distances)):
-    #     for (itemnn,itemdist) in zip(subnn, subdist):
+    # ntrees = 300
+    # nsamples = len(x)
+    # dim = len(x[0])
+    # print('dimension=', dim)
+    # print('nsamples =', nsamples)
+    # search_k = int(ntrees * k * acc_factor)
+    # t = AnnoyIndex(dim, "angular")  # Length of item vector that will be indexed
+    # # Now we add some data
+    # for i in range(nsamples):
+    #     t.add_item(i, x[i])
+    # t1 = time.time()
+    # t.build(ntrees)  # Now we build the trees
+    # t2 = time.time()
+    # # Now lets find the actual neighbors
+    # neighbors = []
+    # distances = []
+    # for i in range(nsamples):
+    #     idx, dist = t.get_nns_by_item(i, k, include_distances=True)
+    #     neighbors.append(idx)
+    #     distances.append(dist)
+    # t3 = time.time()
+    # dist = [item for sublist in distances for item in sublist]
+    # Js = []
+    # Is = []
+    # for i,subnn in enumerate(neighbors):
+    #     for itemnn in subnn:
     #         Js.append(itemnn)
     #         Is.append(i)
-    #         Vs.append(1-itemdist)
-    Vs = np.ones_like(Js)
-    A = csr_matrix((Vs, (Is,Js)),shape=(nsamples,nsamples))
-    A = (A + A.T).sign()
-    t4 = time.time()
-    print('Time spent building trees: {}'.format(t2 - t1))
-    print('Time spent finding knns  : {}'.format(t3 - t2))
-    print('Time spent building A    : {}'.format(t4 - t3))
-    print('Total time spent         : {}'.format(t4 - t1))
+    # Vs = np.ones_like(Js)
+    # A = csr_matrix((Vs, (Is,Js)),shape=(nsamples,nsamples))
+    # A = (A + A.T).sign()
+    # t4 = time.time()
+    # print('Time spent building trees: {}'.format(t2 - t1))
+    # print('Time spent finding knns  : {}'.format(t3 - t2))
+    # print('Time spent building A    : {}'.format(t4 - t3))
+    # print('Total time spent         : {}'.format(t4 - t1))
+    A = 1
+    dist = 1
     return A,statistics.median(dist)
 
 
-def GraphLaplacian(X,A,dist):
+def Laplacian_Euclidian(X,A,dist):
         t1 = time.time()
         if isinstance(X, torch.Tensor):
-            X=X.numpy()
-        A=A.tocoo()
+            X = X.numpy()
+        A = A.tocoo()
         n,_=A.shape
         I = A.row
         J = A.col
@@ -135,11 +128,10 @@ def GraphLaplacian(X,A,dist):
         # for idx, (ii, jj) in enumerate(zip(I, J)):
         #     tmp[idx] = sum((X[ii] - X[jj])**2)
 
-
         return L
 
 
-def ANN_W(X, A,alpha):
+def Laplacian_ICEL(X, A,alpha):
     t1 = time.time()
     if isinstance(X, torch.Tensor):
         X = X.numpy()
@@ -169,7 +161,7 @@ def ANN_W(X, A,alpha):
     print("ANN_W {}".format(t2 - t1))
     return L
 
-def ANN_W2(X, A,alpha):
+def Laplacian_angular(X, A,alpha):
     t1 = time.time()
     if isinstance(X, torch.Tensor):
         X = X.numpy()
