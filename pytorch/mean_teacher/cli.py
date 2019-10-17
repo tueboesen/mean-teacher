@@ -12,8 +12,6 @@ import logging
 from . import architectures, datasets
 
 
-LOG = logging.getLogger('main')
-
 __all__ = ['parse_cmd_args', 'parse_dict_args']
 
 
@@ -109,6 +107,14 @@ def create_parser():
                         help='Determines whether the network is reproductible, will run slower (default: False)')
     parser.add_argument('--data-seed', default=0, type=int,
                         metavar='DS', help='Sets the data_seed, if deterministic is True')
+    parser.add_argument('--use-autoencoder', default=False, type=str2bool,
+                        metavar='eae', help='Use an autoencoder for determining the distance function, or possible to transform away from the input images')
+    parser.add_argument('--ae-arch', default='', type=str,
+                        metavar='ARCH', help='autoencoder architechture')
+    parser.add_argument('--load-autoencoder', default='', type=str, metavar='PATH',
+                        help='path to pretrained autoencoder')
+    parser.add_argument('--save-autoencoder', default=False, type=str2bool, metavar='sae',
+                        help='Save the autoencoder after training')
     # parser.add_argument('--laplace-metric', default=1, type=int,
     #                     metavar='RI', help='Regularization input type, 0 = nn input, 1 = nn output, 2 = hybrid (default 1)')
 
@@ -119,7 +125,7 @@ def parse_commandline_args():
     return create_parser().parse_args()
 
 
-def parse_dict_args(**kwargs):
+def parse_dict_args(LOG,**kwargs):
     def to_cmdline_kwarg(key, value):
         if len(key) == 1:
             key = "-{}".format(key)
@@ -132,8 +138,9 @@ def parse_dict_args(**kwargs):
                     for key, value in kwargs.items())
     cmdline_args = list(sum(kwargs_pairs, ()))
 
-    LOG.info("Using these command line args: %s", " ".join(cmdline_args))
-
+    LOG.info("Using these command line args:")
+    for key, value in kwargs.items():
+        LOG.info("{:30s} : {}".format(key,value))
     return create_parser().parse_args(cmdline_args)
 
 

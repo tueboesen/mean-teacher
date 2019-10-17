@@ -37,6 +37,16 @@ def cifar_shakeshake26(pretrained=False, **kwargs):
     return model
 
 
+# @export
+# def cifar_convnet13(pretrained=False, **kwargs):
+#     assert not pretrained
+#     model = convnet13(ShakeShakeBlock,
+#                         layers=[3, 3, 3],
+#                         channels=96,
+#                         downsample='shift_conv', **kwargs)
+#     return model
+
+
 @export
 def resnext152(pretrained=False, **kwargs):
     assert not pretrained
@@ -47,6 +57,44 @@ def resnext152(pretrained=False, **kwargs):
                           downsample='basic', **kwargs)
     return model
 
+@export
+def auto_encoder(pretrained=False, **kwargs):
+    assert not pretrained
+    model = Autoencoder()
+    return model
+
+
+
+class Autoencoder(nn.Module):
+    def __init__(self):
+        super(Autoencoder, self).__init__()
+        # Input size: [batch, 3, 32, 32]
+        # Output size: [batch, 3, 32, 32]
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 12, 4, stride=2, padding=1),            # [batch, 12, 16, 16]
+            nn.ReLU(),
+            nn.Conv2d(12, 24, 4, stride=2, padding=1),           # [batch, 24, 8, 8]
+            nn.ReLU(),
+			nn.Conv2d(24, 48, 4, stride=2, padding=1),           # [batch, 48, 4, 4]
+            nn.ReLU(),
+			nn.Conv2d(48, 96, 4, stride=2, padding=1),           # [batch, 96, 2, 2]
+            nn.ReLU(),
+        )
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(96, 48, 4, stride=2, padding=1),  # [batch, 48, 4, 4]
+            nn.ReLU(),
+			nn.ConvTranspose2d(48, 24, 4, stride=2, padding=1),  # [batch, 24, 8, 8]
+            nn.ReLU(),
+			nn.ConvTranspose2d(24, 12, 4, stride=2, padding=1),  # [batch, 12, 16, 16]
+            nn.ReLU(),
+            nn.ConvTranspose2d(12, 3, 4, stride=2, padding=1),   # [batch, 3, 32, 32]
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return encoded, decoded
 
 
 class ResNet224x224(nn.Module):

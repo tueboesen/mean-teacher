@@ -48,16 +48,23 @@ def cifar10():
         transforms.ToTensor(),
         transforms.Normalize(**channel_stats)
     ]))
+    ae_transformation = transforms.Compose([
+        data.RandomTranslateWithReflect(4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(**channel_stats)
+    ])
     eval_transformation = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(**channel_stats)
     ])
     nclasses = 10
-    target_transform = transforms.Compose([
-        transforms.Lambda(lambda x: x*torch.ones(nclasses)),
-        transforms.LinearTransformation(torch.eye(nclasses),torch.eye(nclasses))])
+    # target_transform = transforms.Compose([
+    #     transforms.Lambda(lambda x: x*torch.ones(nclasses)),
+    #     transforms.LinearTransformation(torch.eye(nclasses),torch.eye(nclasses))])
 
     return {
+        'ae_transformation': ae_transformation,
         'train_transformation': train_transformation,
         'eval_transformation': eval_transformation,
         # 'target_transformation': target_transform,

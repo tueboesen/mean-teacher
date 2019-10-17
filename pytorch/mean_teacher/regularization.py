@@ -1,4 +1,4 @@
-# from annoy import AnnoyIndex
+from annoy import AnnoyIndex
 import time
 import scipy.io as sio
 from os import walk
@@ -10,6 +10,7 @@ from scipy.sparse import coo_matrix,csr_matrix, identity,triu,tril,diags,spdiags
 from scipy.sparse.linalg import spsolve, cg, LinearOperator, spsolve_triangular
 import torch
 import hnswlib
+from scipy.special import softmax
 
 from mean_teacher.Solver import blkPCG
 
@@ -56,44 +57,42 @@ def ANN_hnsw(x,k=10):
 
 def ANN_annoy(x,k=10):
     acc_factor = 30
-    # ntrees = 300
-    # nsamples = len(x)
-    # dim = len(x[0])
-    # print('dimension=', dim)
-    # print('nsamples =', nsamples)
-    # search_k = int(ntrees * k * acc_factor)
-    # t = AnnoyIndex(dim, "angular")  # Length of item vector that will be indexed
-    # # Now we add some data
-    # for i in range(nsamples):
-    #     t.add_item(i, x[i])
-    # t1 = time.time()
-    # t.build(ntrees)  # Now we build the trees
-    # t2 = time.time()
-    # # Now lets find the actual neighbors
-    # neighbors = []
-    # distances = []
-    # for i in range(nsamples):
-    #     idx, dist = t.get_nns_by_item(i, k, include_distances=True)
-    #     neighbors.append(idx)
-    #     distances.append(dist)
-    # t3 = time.time()
-    # dist = [item for sublist in distances for item in sublist]
-    # Js = []
-    # Is = []
-    # for i,subnn in enumerate(neighbors):
-    #     for itemnn in subnn:
-    #         Js.append(itemnn)
-    #         Is.append(i)
-    # Vs = np.ones_like(Js)
-    # A = csr_matrix((Vs, (Is,Js)),shape=(nsamples,nsamples))
-    # A = (A + A.T).sign()
-    # t4 = time.time()
-    # print('Time spent building trees: {}'.format(t2 - t1))
-    # print('Time spent finding knns  : {}'.format(t3 - t2))
-    # print('Time spent building A    : {}'.format(t4 - t3))
-    # print('Total time spent         : {}'.format(t4 - t1))
-    A = 1
-    dist = 1
+    ntrees = 300
+    nsamples = len(x)
+    dim = len(x[0])
+    print('dimension=', dim)
+    print('nsamples =', nsamples)
+    search_k = int(ntrees * k * acc_factor)
+    t = AnnoyIndex(dim, "angular")  # Length of item vector that will be indexed
+    # Now we add some data
+    for i in range(nsamples):
+        t.add_item(i, x[i])
+    t1 = time.time()
+    t.build(ntrees)  # Now we build the trees
+    t2 = time.time()
+    # Now lets find the actual neighbors
+    neighbors = []
+    distances = []
+    for i in range(nsamples):
+        idx, dist = t.get_nns_by_item(i, k, include_distances=True)
+        neighbors.append(idx)
+        distances.append(dist)
+    t3 = time.time()
+    dist = [item for sublist in distances for item in sublist]
+    Js = []
+    Is = []
+    for i,subnn in enumerate(neighbors):
+        for itemnn in subnn:
+            Js.append(itemnn)
+            Is.append(i)
+    Vs = np.ones_like(Js)
+    A = csr_matrix((Vs, (Is,Js)),shape=(nsamples,nsamples))
+    A = (A + A.T).sign()
+    t4 = time.time()
+    print('Time spent building trees: {}'.format(t2 - t1))
+    print('Time spent finding knns  : {}'.format(t3 - t2))
+    print('Time spent building A    : {}'.format(t4 - t3))
+    print('Total time spent         : {}'.format(t4 - t1))
     return A,statistics.median(dist)
 
 
@@ -132,6 +131,7 @@ def Laplacian_Euclidian(X,A,dist):
 
 
 def Laplacian_ICEL(X, A,alpha):
+    print("alpha = {}".format(alpha))
     t1 = time.time()
     if isinstance(X, torch.Tensor):
         X = X.numpy()
@@ -144,8 +144,8 @@ def Laplacian_ICEL(X, A,alpha):
 
     # for (i,j) in zip(I,J):
     V = np.sum((X[Is] * X[Js]) ** 3, axis=1)
-    print("Number of V elements less than zero {}".format(np.sum(V < 0)))
-    print("smallest V {}".format(np.min(V)))
+    # print("Number of V elements less than zero {}".format(np.sum(V < 0)))
+    # print("smallest V {}".format(np.min(V)))
     assert np.min(V) > 0, print("some elements of V are less than zero")
 
     Aa = coo_matrix((V, (Is, Js)), shape=(nx, nx))
@@ -158,10 +158,11 @@ def Laplacian_ICEL(X, A,alpha):
     I = identity(nx)
     L = (I - alpha * Ww)
     t2 = time.time()
-    print("ANN_W {}".format(t2 - t1))
+    # print("ANN_W {}".format(t2 - t1))
     return L
 
 def Laplacian_angular(X, A,alpha):
+    print("alpha = {}".format(alpha))
     t1 = time.time()
     if isinstance(X, torch.Tensor):
         X = X.numpy()
@@ -187,7 +188,7 @@ def Laplacian_angular(X, A,alpha):
     I = identity(nx)
     L = (I - alpha * Ww)
     t2 = time.time()
-    print("ANN_W {}".format(t2 - t1))
+    # print("ANN_W {}".format(t2 - t1))
     return L
 
 
@@ -233,9 +234,10 @@ def SSL_ADMM(U,idx,C,L,alpha,beta,rho,lambd,V,maxIter):
     muls = 1
     t2 = time.time()
     print("Time on init {}".format(t2-t1))
-    dU = np.empty_like(U)
-    tol = 1e-5
-    maxiter = 100
+    dU2 = np.empty_like(U)
+    tol = 1e-6
+    maxiter = 500
+    cp = V
     while True:
         t3 = time.time()
 
@@ -244,20 +246,25 @@ def SSL_ADMM(U,idx,C,L,alpha,beta,rho,lambd,V,maxIter):
         t4 = time.time()
         reg = 0.5*alpha*np.trace(U @ L @ U.T)/nx
         misfit = F
-        lagrange = rho /2 * np.linalg.norm(U.T - V.T + lambd.T)**2
+        lagrange = rho /2 * np.linalg.norm(cp.T - V.T + lambd.T)**2
         f = reg + misfit + lagrange
+        if f <= 0:
+            print("shit")
+
+
         assert f > 0, "Error: Negative loss function"
-        df =  alpha * U @ L / nx + dF + rho * (U - V + lambd)
+        df = alpha * U @ L / nx + dF + rho * (U - V + lambd)
         t5 = time.time()
         dU=blkPCG(A,df.T,M,MaxIter=maxiter,tol=tol,ortho=True)
         # for i in range(nc):
-        #     dU[i, :], _ = cg(A, df[i, :], M=M,tol=tol,maxiter=maxiter)
+        #     dU2[i, :], _ = cg(A, df[i, :], M=M,tol=tol,maxiter=maxiter)
         t6 = time.time()
         IsIter = 1
         while True:
             Utry = U - muls * dU
+            cp_try = np.exp(Utry) / np.sum(np.exp(Utry), axis=0)
             Ftry,_ = softmaxloss(Utry @ P.T, C)
-            ftry = 0.5*alpha*np.trace(Utry @ L @ Utry.T)/nx + Ftry + rho /2 * np.linalg.norm(Utry.T - V.T + lambd.T)**2
+            ftry = 0.5*alpha*np.trace(Utry @ L @ Utry.T)/nx + Ftry + rho /2 * np.linalg.norm(cp_try.T - V.T + lambd.T)**2
             if ftry < f:
                 if IsIter == 1:
                     muls *= 1.3
@@ -265,7 +272,10 @@ def SSL_ADMM(U,idx,C,L,alpha,beta,rho,lambd,V,maxIter):
             else:
                 muls = muls/2
                 IsIter += 1
-                assert IsIter < 20, "Line search failed"
+                if IsIter > 20:
+                    break
+                #
+                # assert IsIter < 20, "Line search failed"
         t7 = time.time()
         U = Utry
         cp = np.exp(U) / np.sum(np.exp(U),axis=0)
@@ -273,9 +283,11 @@ def SSL_ADMM(U,idx,C,L,alpha,beta,rho,lambd,V,maxIter):
         print("f and df {}".format(t5 - t4))
         print("solver {}".format(t6 - t5))
         print("linesearch {}".format(t7 - t6))
-        print("{:3d} {:10.2e} {:10.2e} {:10.2e} {:10.2e} {:10.2f} \n".format(Iter,f,reg,misfit,lagrange,muls))
+        print("{:3d} {:10.2e} {:10.2e} {:10.2e} {:10.2e} {:10.2e} \n".format(Iter,f,reg,misfit,lagrange,muls))
         Iter += 1
         if Iter > maxIter:
+            break
+        if muls < 1e-8:
             break
     return U, cp
 

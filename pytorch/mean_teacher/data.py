@@ -21,6 +21,7 @@ from torchvision import datasets, transforms
 from torch.utils import data
 from torchvision.datasets.folder import make_dataset, accimage_loader, pil_loader
 import torch
+from torchvision.transforms import ToTensor
 
 from mean_teacher.utils import assert_exactly_one
 
@@ -44,7 +45,8 @@ class RandomTranslateWithReflect:
         self.max_translation = max_translation
 
     def __call__(self, old_image):
-        np.random.seed(10)
+        # np.random.seed(10)
+        # tmp = ToTensor(old_image)
         xtranslation, ytranslation = np.random.randint(-self.max_translation,
                                                        self.max_translation + 1,
                                                        size=2)
@@ -323,7 +325,9 @@ class ImageFolderWithIndex(DatasetFolderWithIndex):
 
 def create_cardinal_Weight(labels):
     counts = np.bincount(labels)
-    weights = np.reciprocal(counts.astype(np.float32))
+    n = len(labels)
+    nc = len(np.unique(labels))
+    weights = np.reciprocal(counts.astype(np.float32))*(n/nc)
     return weights
 
 # def entropy_weights(x):
@@ -333,14 +337,15 @@ def create_cardinal_Weight(labels):
 #     return weights
 
 def entropy_weights(x):
-    nx,nc = x.shape
-    entropy = torch.sum(-x*torch.log(x),dim=1)
-    weights = 1 -entropy/np.log(nc)
+    nx, nc = x.shape
+    entropy = torch.sum(-x * torch.log(x), dim=1)
+    weights = 1 - entropy / np.log(nc)
     return weights
 
 
 
-def create_data_loaders(train_transformation,
+def create_data_loaders(ae_transformation,
+                        train_transformation,
                         eval_transformation,
                         datadir,
                         args):
@@ -371,6 +376,14 @@ def create_data_loaders(train_transformation,
                                                num_workers=args.workers,
                                                pin_memory=True)
 
+    ae_loader = torch.utils.data.DataLoader(
+        torchvision.datasets.ImageFolder(traindir, ae_transformation),
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=2 * args.workers,  # Needs images twice as fast
+        pin_memory=True,
+        drop_last=True)
+
     eval_loader = torch.utils.data.DataLoader(
         torchvision.datasets.ImageFolder(evaldir, eval_transformation),
         batch_size=args.batch_size,
@@ -400,7 +413,7 @@ def create_data_loaders(train_transformation,
         ssl_loader = None
 
 
-    return train_loader, eval_loader, pretrain_loader,ssl_loader
+    return train_loader, eval_loader, pretrain_loader,ssl_loader,ae_loader
 
 
 

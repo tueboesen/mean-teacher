@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
+from torch import optim
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
@@ -21,42 +22,63 @@ import torchvision.datasets
 
 from mean_teacher import architectures, datasets, data, losses, ramps, cli
 from mean_teacher.losses import class_loss_calculation
-from mean_teacher.optimization import train, SSL, train_ADMM, create_model
+from mean_teacher.optimization import train, SSL, train_ADMM, create_model, train_ae
 from mean_teacher.run_context import RunContext
 from mean_teacher.data import NO_LABEL, ImageFolderWithIndex, entropy_weights, create_cardinal_Weight, save_checkpoint, \
     create_data_loaders, save_pretraining
 from mean_teacher.utils import *
 
-LOG = logging.getLogger('main')
+# LOG = logging.getLogger('main')
+# create logger with 'spam_application'
+# LOG.setLevel(logging.DEBUG)
+# create file handler which logs even debug messages
 
-#TODO Clean up the main routine
-#TODO add ANN options to stuff
-#TODO add number of passes per ADMM pass
-#TODO Fix lambd, so it works even with ICEL, consider switching to cp instead?
+
 
 args = None
 best_prec1 = 0
 
+import sys
 
-def main(context):
+
+#
+# class Logger(object):
+#     def __init__(self,directory,name):
+#         self.log_file_path = "{}/{}.log".format(directory, name)
+#         self.terminal = sys.stdout
+#         self.log = open(self.log_file_path, "a")
+#
+#     def write(self, message):
+#         self.terminal.write(message)
+#         self.log.write(message)
+#
+#     def flush(self):
+#         #this flush method is needed for python 3 compatibility.
+#         #this handles the flush command by doing nothing.
+#         #you might want to specify some extra behavior here.
+#         pass
+
+
+
+
+def main(context,LOG):
     global best_prec1
-    #Init
     global_step = 0
+    pre_train_epoch_start = 0
+    skip_pretrain = False
 
     if args.deterministic:
         fix_seed(args.data_seed)
-
     checkpoint_path = context.transient_dir
     training_log = context.create_train_log("training")
     validation_log = context.create_train_log("validation")
     ema_validation_log = context.create_train_log("ema_validation")
     dataset_config = datasets.__dict__[args.dataset]()
     num_classes = dataset_config.pop('num_classes')
-
-    pseudo_iterations = np.round(np.linspace(args.start_epoch, args.epochs,args.ssl_train_iter+1)[0:-1])
+    # sys.stdout = Logger(context.result_dir,"output")
 
     #Data loaders
-    train_loader, eval_loader, pretrain_loader,ssl_loader = create_data_loaders(**dataset_config, args=args)
+    train_loader, eval_loader, pretrain_loader,ssl_loader,ae_loader = create_data_loaders(**dataset_config, args=args)
     if args.entropy_weight:
         target_truth = np.copy(train_loader.dataset.targets)
     else:
@@ -64,6 +86,19 @@ def main(context):
     idx_unlabelled = train_loader.batch_sampler.primary_indices
     for idx in idx_unlabelled:
         train_loader.dataset.targets[idx] = NO_LABEL
+
+    #Use Autoencoder?
+    if args.use_autoencoder:
+        autoencoder = create_model(LOG=LOG,args=args,nc=num_classes,ae=True)
+        if args.load_autoencoder: #Load ae?
+            autoencoder.load_state_dict(torch.load(args.load_autoencoder))
+        else: #Train ae
+            optimizer = optim.Adam(autoencoder.parameters())
+            for epoch in range(100):
+                train_ae(ae_loader, autoencoder, optimizer, epoch, LOG)
+            if args.save_autoencoder:
+                torch.save(autoencoder.state_dict(), "./weights/autoencoder.pkl")
+
 
     #Model creater
     model = create_model(LOG=LOG,args=args,nc=num_classes)
@@ -108,14 +143,16 @@ def main(context):
         assert os.path.isfile(args.load_pretrain), "=> no pretrain found at '{}'".format(args.load_pretrain)
         LOG.info("=> loading pretrained network '{}'".format(args.load_pretrain))
         pretrained = torch.load(args.load_pretrain)
-        args.start_epoch = pretrained['epoch']
+        args.start_epoch = 0
         global_step = pretrained['global_step']
         model.load_state_dict(pretrained['state_dict'])
         ema_model.load_state_dict(pretrained['ema_state_dict'])
         optimizer.load_state_dict(pretrained['optimizer'])
         lambd = pretrained['lambd']
+        pre_train_epoch_start = pretrained['epoch']
         LOG.info("=> loaded pretrained network '{}' (epoch {})".format(args.load_pretrain, pretrained['epoch']))
-        args.resume = True
+        if pre_train_epoch_start >= args.pre_train_epochs:
+            skip_pretrain = True
 
     if not args.deterministic:
         cudnn.benchmark = True
@@ -129,11 +166,12 @@ def main(context):
 
     nx = len(train_loader.dataset.targets)
     nc = train_loader.dataset.nclasses
-    if not args.resume:
-        for epoch in range(args.pre_train_epochs):
+    if not skip_pretrain:
+        lambd = np.zeros((nc, nx))
+        for epoch in range(pre_train_epoch_start,args.pre_train_epochs):
             start_time = time.time()
             # train for one epoch
-            train(train_loader, model, ema_model, optimizer, epoch, training_log,args,global_step,LOG)
+            global_step = train(train_loader, model, ema_model, optimizer, epoch, training_log,args,global_step,LOG)
             # train(pretrain_loader, model, ema_model, optimizer, epoch, training_log,args,global_step,LOG)
             LOG.info("--- pretraining epoch in %s seconds ---" % (time.time() - start_time))
             start_time = time.time()
@@ -143,10 +181,22 @@ def main(context):
             ema_prec1 = validate(eval_loader, ema_model, ema_validation_log, global_step, epoch + 1,LOG,args)
             LOG.info("--- validation in %s seconds ---" % (time.time() - start_time))
 
-        lambd = np.zeros((nc, nx))
+            if args.checkpoint_epochs and (epoch + 1) % args.checkpoint_epochs == 0:
+                if args.save_pretrain:
+                    save_pretraining({
+                        'epoch': epoch+1,
+                        'global_step': global_step,
+                        'arch': args.arch,
+                        'state_dict': model.state_dict(),
+                        'ema_state_dict': ema_model.state_dict(),
+                        'best_prec1': best_prec1,
+                        'optimizer': optimizer.state_dict(),
+                        'lambd': lambd,
+                    }, checkpoint_path, epoch + 1)
+
         if args.save_pretrain:
             save_pretraining({
-                'epoch': 0,
+                'epoch': epoch+1,
                 'global_step': global_step,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
@@ -156,14 +206,14 @@ def main(context):
                 'lambd': lambd,
             }, checkpoint_path, epoch + 1)
 
-
-
+    args.start_epoch += 60
+    pseudo_iterations = np.round(np.linspace(args.start_epoch, args.epochs,args.ssl_train_iter+1)[0:-1])
     for epoch in range(args.start_epoch, args.epochs):
         if epoch in pseudo_iterations:
             # Generate Pseudo labels
             idx_labelled = train_loader.batch_sampler.secondary_indices
             target_labelled = [train_loader.dataset.targets[idx] for idx in idx_labelled]
-            U, V, cp = SSL(ssl_loader, model, optimizer, epoch, training_log, idx_labelled, target_labelled, lambd,
+            cp, cp_old = SSL(ssl_loader, ema_model, optimizer, epoch, LOG, idx_labelled, target_labelled, lambd,
                            target_truth, args)
 
             label = np.argmax(cp, axis=1)
@@ -179,13 +229,13 @@ def main(context):
 
 
         #Update Lambda
-        lambd += U - V
+        lambd += cp.T - cp_old.T
         print("Lambda mean value = {}".format(np.mean(np.abs(lambd))))
 
 
         start_time = time.time()
         lambd = torch.from_numpy(lambd.T).float().cuda()
-        train_ADMM(train_loader, model, ema_model, optimizer, epoch, training_log,lambd,idx_labelled,args,global_step,LOG)
+        train_ADMM(train_loader, model, ema_model, optimizer, epoch, training_log, lambd, idx_labelled, args,global_step, LOG)
         lambd = lambd.t().cpu().numpy()
         LOG.info("--- training epoch in %s seconds ---" % (time.time() - start_time))
 
@@ -211,8 +261,8 @@ def main(context):
                 'ema_state_dict': ema_model.state_dict(),
                 'best_prec1': best_prec1,
                 'optimizer' : optimizer.state_dict(),
-                'U': U,
-                'V': V,
+                # 'U': U,
+                # 'V': V,
                 'lambd': lambd,
                 'target_truth': target_truth,
                 'label': label,

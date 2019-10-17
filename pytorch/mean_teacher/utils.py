@@ -236,7 +236,7 @@ def accuracy(output, target, topk=(1,),NO_LABEL=-1):
 
 
 
-def accuracy_SSL(label,target,nc):
+def accuracy_SSL(label,target,nc,LOG):
     hits = np.zeros(nc)
     acc = np.zeros(nc)
     acc_tot = np.sum(label == target) / len(label) * 100
@@ -244,12 +244,12 @@ def accuracy_SSL(label,target,nc):
         hits[i] = np.sum(label == i) / len(label) * 100
         acc[i] = np.sum(label[label == i] == target[label == i]) / np.sum(target==i)*100
 
-    print("SSL hits (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(
+    LOG.info("SSL hits (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(
             hits[0],hits[1],hits[2],hits[3],hits[4],hits[5],hits[6],hits[7],hits[8],hits[9]))
-    print(
+    LOG.info(
         "SSL acc (%): \n {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f}   {:3.2f} \n".format(
             acc[0], acc[1], acc[2], acc[3], acc[4], acc[5], acc[6], acc[7], acc[8], acc[9]))
-    print("SSL Acc tot = {:3.2f} \n".format(acc_tot))
+    LOG.info("SSL Acc tot = {:3.2f} \n".format(acc_tot))
 
 def fix_seed(seed):
     torch.manual_seed(seed)

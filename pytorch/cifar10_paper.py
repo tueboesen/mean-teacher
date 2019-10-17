@@ -36,9 +36,6 @@ def parameters():
         'SSL_ADMM': 0,
         'deterministic': False,
 
-        'save_autoencoder': True,
-        'use_autoencoder': True,
-        # 'load_autoencoder':
         # Save/Load
         # 'resume': ".\\results\\cifar10_test\\2019-09-25_16_58_52\\4000_10\\transient\\checkpoint.2.ckpt",
          'save_pretrain': True,
@@ -55,9 +52,8 @@ def parameters():
         'base_labeled_batch_size': 31,
 
         # Architecture
-        'arch': 'cifar_smalltest',
-        'ae_arch': 'auto_encoder',
-        # 'arch': 'cifar_shakeshake26',
+        # 'arch': 'cifar_smalltest',
+        'arch': 'cifar_shakeshake26',
 
         # Costs
         'consistency_type': 'mse',
@@ -83,96 +79,89 @@ def parameters():
     #         'lr_rampdown_epochs': 350,
     #         'ema_decay': 0.99,
     #     }
+    for data_seed in range(10,20):
+        #100 labels:
+        yield {
+            **defaults,
+            'title': '100-label cifar-10',
+            'n_labels': 100,
+            'pre_train_epochs': 180,
+            'data_seed': data_seed,
+            'epochs': 180,
+            'lr_rampdown_epochs': 210,
+            'ema_decay': 0.97,
+            'base_batch_size': 100,
+            'base_labeled_batch_size': 31,
+        }
+        #250 labels:
+        yield {
+            **defaults,
+            'title': '250-label cifar-10',
+            'n_labels': 250,
+            'pre_train_epochs': 180,
+            'data_seed': data_seed,
+            'epochs': 180,
+            'lr_rampdown_epochs': 210,
+            'ema_decay': 0.97,
+            'base_batch_size': 100,
+            'base_labeled_batch_size': 31,
+        }
+        # 500 labels
+        yield {
+            **defaults,
+            'title': '500-label cifar-10',
+            'n_labels': 500,
+            'pre_train_epochs': 180,
+            'data_seed': data_seed,
+            'epochs': 180,
+            'lr_rampdown_epochs': 210,
+            'ema_decay': 0.97,
+            'base_batch_size': 100,
+            'base_labeled_batch_size': 31,
+        }
 
-    # 100 labels:
-    # for data_seed in range(10, 11):
-    #     yield {
-    #         **defaults,
-    #         'title': '100-label cifar-10',
-    #         'pre_train_epochs': 60,
-    #         'n_labels': 100,
-    #         'data_seed': data_seed,
-    #         'epochs': 60,
-    #         'lr_rampdown_epochs': 80,
-    #         'ema_decay': 0.95,
-    #         'base_batch_size': 100,
-    #         'base_labeled_batch_size': 11,
-    #     }
-    #
-    # for data_seed in range(10, 11):
-    #     yield {
-    #         **defaults,
-    #         'title': '250-label cifar-10',
-    #         'pre_train_epochs': 120,
-    #         'n_labels': 250,
-    #         'data_seed': data_seed,
-    #         'epochs': 120,
-    #         'lr_rampdown_epochs': 150,
-    #         'ema_decay': 0.95,
-    #         'base_batch_size': 256,
-    #         'base_labeled_batch_size': 11,
-    #     }
-    #
-    # for data_seed in range(10, 11):
-    #     yield {
-    #         **defaults,
-    #         'title': '500-label cifar-10',
-    #         'pre_train_epochs': 180,
-    #         'n_labels': 500,
-    #         'data_seed': data_seed,
-    #         'epochs': 180,
-    #         'lr_rampdown_epochs': 210,
-    #         'ema_decay': 0.97,
-    #         'base_batch_size': 100,
-    #         'base_labeled_batch_size': 31,
-    #     }
-    #
-    # # 1000 labels:
-    # for data_seed in range(10, 11):
-    #     yield {
-    #         **defaults,
-    #         'title': '1000-label cifar-10',
-    #         'pre_train_epochs': 180,
-    #         'n_labels': 1000,
-    #         'data_seed': data_seed,
-    #         'epochs': 180,
-    #         'lr_rampdown_epochs': 210,
-    #         'ema_decay': 0.97,
-    #         'base_batch_size': 128,
-    #         'base_labeled_batch_size': 31,
-    #     }
-
-    # 1000 labels: different batch size
-    for data_seed in range(10, 11):
+        # 1000 labels:
         yield {
             **defaults,
             'title': '1000-label cifar-10',
-            'pre_train_epochs': 2,
             'n_labels': 1000,
+            'pre_train_epochs': 180,
             'data_seed': data_seed,
-            'epochs': 2,
+            'epochs': 180,
+            'lr_rampdown_epochs': 210,
+            'ema_decay': 0.97,
+            'base_batch_size': 128,
+            'base_labeled_batch_size': 31,
+        }
+
+        # 1000 labels: different batch size
+        yield {
+            **defaults,
+            'title': '1000-label cifar-10',
+            'n_labels': 1000,
+            'pre_train_epochs': 180,
+            'data_seed': data_seed,
+            'epochs': 180,
             'lr_rampdown_epochs': 210,
             'ema_decay': 0.97,
             'base_batch_size': 100,
             'base_labeled_batch_size': 31,
         }
 
-    # 2000 labels:
-    for data_seed in range(10, 11):
+        # 2000 labels:
         yield {
             **defaults,
             'title': '2000-label cifar-10',
-            'pre_train_epochs': 2,
+            'pre_train_epochs': 180,
             'n_labels': 2000,
             'data_seed': data_seed,
-            'epochs': 3,
+            'epochs': 180,
             'lr_rampdown_epochs': 210,
             'ema_decay': 0.97,
             'base_batch_size': 100,
             'base_labeled_batch_size': 31,
         }
-    # 4000 labels:
-    for data_seed in range(10, 11):
+        # 4000 labels:
         yield {
             **defaults,
             'title': '4000-label cifar-10',
@@ -210,7 +199,6 @@ def run(title, base_batch_size, base_labeled_batch_size, base_lr, n_labels, data
 
     LOG.info('Run finished, closing logfile.')
     LOG.removeHandler(fh)
-
 
 if __name__ == "__main__":
     for run_params in parameters():

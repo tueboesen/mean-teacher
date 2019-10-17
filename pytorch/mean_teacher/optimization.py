@@ -13,7 +13,7 @@ from mean_teacher.regularization import ANN_hnsw, SSL_Icen, ANN_annoy, Laplacian
 from mean_teacher.utils import AverageMeterSet, accuracy, update_ema_variables, adjust_learning_rate, \
     get_current_consistency_weight, accuracy_SSL
 from torch.autograd import Variable
-
+from scipy.special import softmax
 
 def train(train_loader, model, ema_model, optimizer, epoch, log,args,global_step,LOG):
 
@@ -78,10 +78,12 @@ def train(train_loader, model, ema_model, optimizer, epoch, log,args,global_step
         else:
             target_max = torch.argmax(target_var,dim=1)
 
-        class_loss = class_criterion(class_logit, target_max) / labeled_minibatch_size
+        class_loss = class_criterion(class_logit, target_max) / minibatch_size
+        # class_loss = class_criterion(class_logit, target_max) / labeled_minibatch_size
         meters.update('class_loss', class_loss.item())
 
-        ema_class_loss = class_criterion(ema_logit, target_max) / labeled_minibatch_size
+        ema_class_loss = class_criterion(ema_logit, target_max) / minibatch_size
+        # ema_class_loss = class_criterion(ema_logit, target_max) / labeled_minibatch_size
         meters.update('ema_class_loss', ema_class_loss.item())
 
         if args.consistency:
@@ -136,6 +138,29 @@ def train(train_loader, model, ema_model, optimizer, epoch, log,args,global_step
                 **meters.averages(),
                 **meters.sums()
             })
+    return global_step
+
+
+def train_ae(train_loader, model, optimizer, epoch, LOG):
+
+    # criterion = nn.BCELoss()
+    criterion = nn.MSELoss(reduction='mean').cuda()
+    model.train()
+    running_loss = 0.0
+    for i, (input, _) in enumerate(train_loader):
+        input_var = torch.autograd.Variable(input.cuda(non_blocking=True))
+
+        # ============ Forward ============
+        encoded, outputs = model(input_var)
+        loss = criterion(outputs, input_var)
+        # ============ Backward ============
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.data
+
+        # ============ Logging ============
+    LOG.info("Epoch {}, loss: {:.3f}".format(epoch, running_loss / (i+1)))
 
 def train_ADMM(train_loader, model, ema_model, optimizer, epoch, log,lambd,tmp,args,global_step,LOG):
     labels = train_loader.dataset.targets[:]
@@ -204,8 +229,10 @@ def train_ADMM(train_loader, model, ema_model, optimizer, epoch, log,lambd,tmp,a
         iu = list(range(0, unlabeled_minibatch_size))
         ik = list(range(unlabeled_minibatch_size, minibatch_size))
 
-        class_loss = class_loss_calculation(class_logit+lambd_select, target_var, iu, ik, class_criterion, CW,softx=softmax1)
-        ema_class_loss = class_loss_calculation(ema_logit+lambd_select, target_var, iu, ik, class_criterion, CW, softx=softmax2)
+        class_loss = class_loss_calculation(class_logit, target_var, iu, ik, class_criterion, CW,softx=softmax1)
+        ema_class_loss = class_loss_calculation(ema_logit, target_var, iu, ik, class_criterion, CW, softx=softmax2)
+        # class_loss = class_loss_calculation(class_logit+lambd_select, target_var, iu, ik, class_criterion, CW,softx=softmax1)
+        # ema_class_loss = class_loss_calculation(ema_logit+lambd_select, target_var, iu, ik, class_criterion, CW, softx=softmax2)
 
         meters.update('class_loss', class_loss.item())
         meters.update('ema_class_loss', ema_class_loss.item())
@@ -232,6 +259,11 @@ def train_ADMM(train_loader, model, ema_model, optimizer, epoch, log,lambd,tmp,a
 
 
         loss = class_loss + consistency_loss + res_loss
+        if (np.isnan(loss.item()) or loss.item() > 1e5):
+           print("class_loss= {}".format(class_loss))
+           print("consistency_loss= {}".format(consistency_loss))
+           print("res_loss= {}".format(res_loss))
+
         assert not (np.isnan(loss.item()) or loss.item() > 1e5), 'Loss explosion: {}'.format(loss.item())
         meters.update('loss', loss.item())
 
@@ -303,72 +335,298 @@ def SSL(SSL_loader, model, log, global_step, epoch, idx,C,lambd,target_truth,arg
         descriptor_flat = np.asarray([item for sublist in descriptorcpu for item in sublist])
         input_array = np.asarray([item for sublist in input_list for item in sublist])
         U = np.asarray([item for sublist in outputcpu for item in sublist]).transpose()
+        cp = softmax(U.T, axis=1)
         V = np.copy(U)
         Cc = np.argmax(U.T, axis=1)
         nc, nx = U.shape
 
-        accuracy_SSL(Cc,target_truth,nc)
+        accuracy_SSL(Cc,target_truth,nc,log)
 
-        if args.reg_input == 0:
-            graph_feats = input_array.reshape(input_array.shape[0], -1)
-        elif args.reg_input == 1:
+
+        if args.ANN_method == -1: #Debug mode, try everything:
             graph_feats = descriptor_flat
-        elif args.reg_input == 2:
-            alpha = 1-min(0.01*global_step,1)
-            graph_feats = alpha*input_var + (1-alpha)*descriptor_flat
-
-        if args.ANN_method == 0:
-            raise("Method not made yet")
-        elif args.ANN_method == 1:
-            A,d = ANN_annoy(graph_feats)
-        elif args.ANN_method == 2:
-            A, d = ANN_hnsw(graph_feats)
-        else:
-            raise("Not valid ANN method selected")
-
-        if args.laplace_mode == 0:
-            L = Laplacian_Euclidian(graph_feats, A, d)
-        elif args.laplace_mode == 1:
+            # t0 = time.time()
+            # A1, d1 = ANN_annoy(graph_feats)
+            # t1 = time.time()
+            # print("ANN annoy {}".format(t1-t0))
+            A2, d2 = ANN_hnsw(graph_feats)
+            # t2 = time.time()
+            # print("ANN hnsw {}".format(t2-t1))
+            # Le1 = Laplacian_Euclidian(graph_feats, A1, d1)
+            # Le2 = Laplacian_Euclidian(graph_feats, A2, d2)
+            # t3 = time.time()
+            # print("Lap Euclidian {}".format(t3-t2))
             alpha = 0.99
-            L = Laplacian_ICEL(graph_feats, A, alpha)
-        elif args.laplace_mode == 2:
-            alpha = 0.99
-            L = Laplacian_angular(graph_feats, A, alpha)
-        else:
-            raise("An invalid Laplace_mode was selected")
+            # Li1 = Laplacian_ICEL(graph_feats, A1, alpha)
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            # t4 = time.time()
+            # print("Lap ICEL {}".format(t4-t3))
+            # La1 = Laplacian_angular(graph_feats, A1, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+            # t5 = time.time()
+            # print("Lap angular {}".format(t5-t4))
 
-        if args.SSL_ADMM == 0:
+            # Y = np.zeros((nx, nc))
+            # for (i, val) in zip(idx, C):
+            #     Y[i, val] = 1
+            # cp_new = SSL_Icen(Le1, Y)
+            # Cc = np.argmax(cp_new.T, axis=1)
+            # accuracy_SSL(Cc, target_truth, nc)
+            #
+            # Y = np.zeros((nx, nc))
+            # for (i, val) in zip(idx, C):
+            #     Y[i, val] = 1
+            # cp_new = SSL_Icen(Le2, Y)
+            # Cc = np.argmax(cp_new.T, axis=1)
+            # accuracy_SSL(Cc, target_truth, nc)
+
+            alpha = 0.95
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+
+
             Y = np.zeros((nx, nc))
             for (i, val) in zip(idx, C):
                 Y[i, val] = 1
-            cp = SSL_Icen(L, Y)
-        elif args.SSL_ADMM == 1:
-            beta = 1e-3
-            rho = 1e-3
-            maxIter = 20
-            nc = len(np.unique(C))
-            nk = len(C)
-            Cpk = np.zeros((nc, nk))
-            alpha = 100
-            U, cp = SSL_ADMM(U, idx, Cpk, L, alpha, beta, rho, lambd, V, maxIter)
+            cp_new = SSL_Icen(Li2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(La2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+
+            alpha = 0.98
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(Li2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(La2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+
+            alpha = 0.99
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(Li2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(La2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+
+            alpha = 0.995
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(Li2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(La2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+
+            alpha = 0.999
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(Li2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(La2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+
+            alpha = 0.9995
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(Li2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(La2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+
+            alpha = 0.9999
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(Li2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(La2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc)
+
+            alpha = 0.99995
+            Li2 = Laplacian_ICEL(graph_feats, A2, alpha)
+            La2 = Laplacian_angular(graph_feats, A2, alpha)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(Li2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+            Y = np.zeros((nx, nc))
+            for (i, val) in zip(idx, C):
+                Y[i, val] = 1
+            cp_new = SSL_Icen(La2, Y)
+            Cc = np.argmax(cp_new.T, axis=1)
+            accuracy_SSL(Cc, target_truth, nc,log)
+
+
+
+            # nc = len(np.unique(C))
+            # nk = len(C)
+            # Cpk = np.zeros((nc, nk))
+            # tt = range(len(idx))
+            # ta = target_truth[idx]
+            # Cpk[ta, tt] = 1
+            # beta = 1e-3
+            # rho = 1e-6
+            # maxIter = 100
+            # alpha = 200
+
+            # U = np.copy(V)
+            # _, cp_new = SSL_ADMM(U, idx, Cpk, Le1, alpha, beta, rho, lambd, cp.T, maxIter)
+            # Cc = np.argmax(cp_new.T, axis=1)
+            # accuracy_SSL(Cc, target_truth, nc)
+
+            # U = np.copy(V)
+            # _, cp_new = SSL_ADMM(U, idx, Cpk, Le2, alpha, beta, rho, lambd, cp.T, maxIter)
+            # Cc = np.argmax(cp_new.T, axis=1)
+            # accuracy_SSL(Cc, target_truth, nc)
+
+            # U = np.copy(V)
+            # _, cp_new = SSL_ADMM(U, idx, Cpk, Li1, alpha, beta, rho, lambd, cp.T, maxIter)
+            # Cc = np.argmax(cp_new.T, axis=1)
+            # accuracy_SSL(Cc, target_truth, nc)
+            #
+            # U = np.copy(V)
+            # _, cp_new = SSL_ADMM(U, idx, Cpk, Li2, alpha, beta, rho, lambd, cp.T, maxIter)
+            # Cc = np.argmax(cp_new.T, axis=1)
+            # accuracy_SSL(Cc, target_truth, nc)
+            #
+            # U = np.copy(V)
+            # _, cp_new = SSL_ADMM(U, idx, Cpk, La1, alpha, beta, rho, lambd, cp.T, maxIter)
+            # Cc = np.argmax(cp_new.T, axis=1)
+            # accuracy_SSL(Cc, target_truth, nc)
+            #
+            # U = np.copy(V)
+            # _, cp_new = SSL_ADMM(U, idx, Cpk, La2, alpha, beta, rho, lambd, cp.T, maxIter)
+            # Cc = np.argmax(cp_new.T, axis=1)
+            # accuracy_SSL(Cc, target_truth, nc)
+
         else:
-            raise("An invalid SSL_ADMM value was selected")
+            if args.reg_input == 0:
+                graph_feats = input_array.reshape(input_array.shape[0], -1)
+            elif args.reg_input == 1:
+                graph_feats = descriptor_flat
+            elif args.reg_input == 2:
+                alpha = 1-min(0.01*global_step,1)
+                graph_feats = alpha*input_var + (1-alpha)*descriptor_flat
+
+            if args.ANN_method == 0:
+                raise("Method not made yet")
+            elif args.ANN_method == 1:
+                A,d = ANN_annoy(graph_feats)
+            elif args.ANN_method == 2:
+                A, d = ANN_hnsw(graph_feats)
+            else:
+                raise("Not valid ANN method selected")
+
+            if args.laplace_mode == 0:
+                L = Laplacian_Euclidian(graph_feats, A, d)
+            elif args.laplace_mode == 1:
+                alpha = 0.99
+                L = Laplacian_ICEL(graph_feats, A, alpha)
+            elif args.laplace_mode == 2:
+                alpha = 0.99
+                L = Laplacian_angular(graph_feats, A, alpha)
+            else:
+                raise("An invalid Laplace_mode was selected")
+
+            if args.SSL_ADMM == 0:
+                Y = np.zeros((nx, nc))
+                for (i, val) in zip(idx, C):
+                    Y[i, val] = 1
+                cp_new = SSL_Icen(L, Y)
+            elif args.SSL_ADMM == 1:
+                beta = 1e-3
+                rho = 1e-3
+                maxIter = 20
+                nc = len(np.unique(C))
+                nk = len(C)
+                Cpk = np.zeros((nc, nk))
+                tt = range(len(idx))
+                ta = target_truth[idx]
+                Cpk[ta, tt] = 1
+                alpha = 100
+                U, cp_new = SSL_ADMM(U, idx, Cpk, L, alpha, beta, rho, lambd, V, maxIter)
+            else:
+                raise("An invalid SSL_ADMM value was selected")
+
 
         #Test acc of ANNs
-        Cc = np.argmax(cp.T, axis=1)
-        accuracy_SSL(Cc, target_truth, nc)
+        Cc = np.argmax(cp_new.T, axis=1)
+        accuracy_SSL(Cc, target_truth, nc,log)
 
 
-    return U, V, cp.T
+    return cp_new.T, cp
 
 
-def create_model(ema=False,LOG=None,args=None,nc=None):
-    LOG.info("=> creating {pretrained}{ema}model '{arch}'".format(
-        pretrained='pre-trained ' if args.pretrained else '',
-        ema='EMA ' if ema else '',
-        arch=args.arch))
-
-    model_factory = architectures.__dict__[args.arch]
+def create_model(ema=False,LOG=None,args=None,nc=None,ae=False):
+    if ae:
+        LOG.info("=> creating {pretrained}{ema}model '{arch}'".format(
+            pretrained='pre-trained ' if args.pretrained else '',
+            ema='EMA ' if ema else '',
+            arch=args.ae_arch))
+    else:
+        LOG.info("=> creating {pretrained}{ema}model '{arch}'".format(
+            pretrained='pre-trained ' if args.pretrained else '',
+            ema='EMA ' if ema else '',
+            arch=args.arch))
+    if ae:
+        model_factory = architectures.__dict__[args.ae_arch]
+    else:
+        model_factory = architectures.__dict__[args.arch]
     model_params = dict(pretrained=args.pretrained, num_classes=nc)
     model = model_factory(**model_params)
     model = nn.DataParallel(model).cuda()
